@@ -251,6 +251,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._model_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
+        # CHAT booking state: chat_id → {step, date, time, ...}
+        self._booking_state: Dict[str, dict] = {}
 
     @staticmethod
     def _is_callback_user_authorized(user_id: str) -> bool:
@@ -1602,6 +1604,105 @@ class TelegramAdapter(BasePlatformAdapter):
             # Catch-all (e.g. page counter button "mx:noop")
             await query.answer()
 
+    async def _handle_booking_callback(
+        self, query, data: str, chat_id: str
+    ) -> None:
+        """Handle CHAT appointment booking inline keyboard callbacks (bk:action:value)."""
+        # Parse callback data: bk:action:value
+        parts = data.split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        value = parts[2] if len(parts) > 2 else ""
+
+        # Get or create booking state for this chat
+        state = self._booking_state.get(chat_id, {"step": "date"})
+
+        if action == "date":
+            # Date selected, show time slots
+            state["date"] = value
+            state["step"] = "time"
+            self._booking_state[chat_id] = state
+
+            # Build time keyboard (12pm-9pm for CHAT)
+            time_slots = []
+            for hour in range(12, 22):  # 12pm to 9pm
+                time_str = f"{hour}:00"
+                time_slots.append(InlineKeyboardButton(time_str, callback_data=f"bk:time:{time_str}"))
+            time_rows = [time_slots[i:i+3] for i in range(0, len(time_slots), 3)]
+            time_rows.append([InlineKeyboardButton("❌ Cancel", callback_data="bk:cancel")])
+            keyboard = InlineKeyboardMarkup(time_rows)
+
+            await query.edit_message_text(
+                text=(
+                    f"📅 *CHAT Appointment Booking*\n\n"
+                    f"Selected date: *{value}*\n\n"
+                    f"Choose a time slot:"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard,
+            )
+            await query.answer()
+
+        elif action == "time":
+            # Time selected, show confirmation
+            selected_date = state.get("date", "unknown")
+            state["time"] = value
+            state["step"] = "confirm"
+            self._booking_state[chat_id] = state
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Confirm", callback_data="bk:confirm:yes"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bk:cancel"),
+                ]
+            ])
+
+            await query.edit_message_text(
+                text=(
+                    f"📅 *CHAT Appointment Booking*\n\n"
+                    f"Date: *{selected_date}*\n"
+                    f"Time: *{value}*\n"
+                    f"Location: *Scape Orchard*\n\n"
+                    f"Confirm this appointment?"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard,
+            )
+            await query.answer()
+
+        elif action == "confirm":
+            # Booking confirmed
+            selected_date = state.get("date", "unknown")
+            selected_time = state.get("time", "unknown")
+
+            # Clear state
+            self._booking_state.pop(chat_id, None)
+
+            await query.edit_message_text(
+                text=(
+                    f"✅ *Appointment Booked!*\n\n"
+                    f"Date: *{selected_date}*\n"
+                    f"Time: *{selected_time}*\n"
+                    f"Location: *CHAT @ Scape Orchard*\n\n"
+                    f"Remember: CHAT is for ages 16-30. Walk-ins also welcome Tue-Sat 12pm-9pm.\n\n"
+                    f"If you need immediate support, call SOS 1767 or IMH 6389 2222."
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=None,
+            )
+            await query.answer(text="Appointment booked!")
+
+        elif action == "cancel":
+            # Cancel booking
+            self._booking_state.pop(chat_id, None)
+            await query.edit_message_text(
+                text="Booking cancelled. You can start again anytime by asking to book an appointment.",
+                reply_markup=None,
+            )
+            await query.answer(text="Cancelled")
+
+        else:
+            await query.answer(text="Unknown action")
+
     async def _handle_callback_query(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
     ) -> None:
@@ -1616,6 +1717,13 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_id = str(query.message.chat_id) if query.message else None
             if chat_id:
                 await self._handle_model_picker_callback(query, data, chat_id)
+            return
+
+        # --- CHAT Booking callbacks (bk:action:value) ---
+        if data.startswith("bk:"):
+            chat_id = str(query.message.chat_id) if query.message else None
+            if chat_id:
+                await self._handle_booking_callback(query, data, chat_id)
             return
 
         # --- Exec approval callbacks (ea:choice:id) ---

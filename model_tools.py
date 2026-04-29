@@ -580,6 +580,15 @@ def handle_function_call(
         except Exception:
             pass
 
+        # [MindMate] Sanitize tool result: strip internal metadata before
+        # it reaches any consumer (LLM context, logs, or proxy).
+        # Runs after transform_tool_result hook so plugins see raw data.
+        try:
+            from agent.tool_result_sanitizer import sanitize_tool_result
+            result = sanitize_tool_result(result, function_name)
+        except Exception:
+            pass  # Fail-open: sanitization failure must not break tool dispatch
+
         return result
 
     except Exception as e:

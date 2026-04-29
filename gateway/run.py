@@ -4514,6 +4514,25 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
 
+            # [MindMate] Light safety-net: catch any residual leaks that slipped
+            # through the source-level sanitizer (agent/tool_result_sanitizer.py).
+            # The sanitizer does the heavy lifting; this is defense-in-depth for
+            # edge cases where the LLM echoes tool names from its training data.
+            import re as _re
+            _SAFETY_NET_PATTERNS = [
+                r'\[Skill directory:[^\]]*\]',           # [Skill directory: ...]
+                r'toolInfo\s*:\s*\{.*?\}',                # toolInfo JSON blocks (multi-line)
+                r'\{[^{}]*"toolCallId"[^{}]*\}',         # inline tool_call JSON
+                r'Load any of these with skill_view[^\n]*',  # skill_view usage hints
+                r'"readiness_status"\s*:\s*"\w+"',        # readiness status leaks
+                r'"setup_needed"\s*:\s*(?:True|False)',    # setup flag leaks
+            ]
+            for _pat in _SAFETY_NET_PATTERNS:
+                response = _re.sub(_pat, '', response, flags=_re.IGNORECASE | _re.DOTALL)
+            response = _re.sub(r'\n{3,}', '\n\n', response)
+            response = _re.sub(r'[ \t]+$', '', response, flags=_re.MULTILINE)
+            response = response.strip()
+
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
             # produce visible content after exhausting all retries (nudge,
@@ -5484,7 +5503,6 @@ class GatewayRunner:
                 try:
                     providers = list_authenticated_providers(
                         current_provider=current_provider,
-                        current_base_url=current_base_url,
                         user_providers=user_provs,
                         custom_providers=custom_provs,
                         max_models=50,
@@ -5596,7 +5614,6 @@ class GatewayRunner:
             try:
                 providers = list_authenticated_providers(
                     current_provider=current_provider,
-                    current_base_url=current_base_url,
                     user_providers=user_provs,
                     custom_providers=custom_provs,
                     max_models=5,
@@ -8665,12 +8682,7 @@ class GatewayRunner:
         override = self._session_model_overrides.get(session_key)
         return override is not None and override.get("model") == agent_model
 
-    def _release_running_agent_state(
-        self,
-        session_key: str,
-        *,
-        run_generation: Optional[int] = None,
-    ) -> bool:
+    def _release_running_agent_state(self, session_key: str) -> None:
         """Pop ALL per-running-agent state entries for ``session_key``.
 
         Replaces ad-hoc ``del self._running_agents[key]`` calls scattered
@@ -8686,25 +8698,13 @@ class GatewayRunner:
         across turns (``_session_model_overrides``, ``_voice_mode``,
         ``_pending_approvals``, ``_update_prompt_pending``) is NOT
         touched here — those have their own lifecycles.
-
-        When ``run_generation`` is provided, only clear the slot if that
-        generation is still current for the session.  This prevents an
-        older async run whose generation was bumped by /stop or /new from
-        clobbering a newer run's state during its own unwind.  Returns
-        True when the slot was cleared, False when an ownership guard
-        blocked it.
         """
         if not session_key:
-            return False
-        if run_generation is not None and not self._is_session_run_current(
-            session_key, run_generation
-        ):
-            return False
+            return
         self._running_agents.pop(session_key, None)
         self._running_agents_ts.pop(session_key, None)
         if hasattr(self, "_busy_ack_ts"):
             self._busy_ack_ts.pop(session_key, None)
-        return True
 
     def _clear_session_boundary_security_state(self, session_key: str) -> None:
         """Clear approval state that must not survive a real conversation switch."""
@@ -10266,24 +10266,10 @@ class GatewayRunner:
             # Wait for agent to be created
             while agent_holder[0] is None:
                 await asyncio.sleep(0.05)
-            if not session_key:
-                return
-            # Only promote the sentinel to the real agent if this run is still
-            # current.  If /stop or /new bumped the generation while we were
-            # spinning up, leave the newer run's slot alone — we'll be
-            # discarded by the stale-result check in _handle_message_with_agent.
-            if run_generation is not None and not self._is_session_run_current(
-                session_key, run_generation
-            ):
-                logger.info(
-                    "Skipping stale agent promotion for %s — generation %s is no longer current",
-                    (session_key or "")[:20],
-                    run_generation,
-                )
-                return
-            self._running_agents[session_key] = agent_holder[0]
-            if self._draining:
-                self._update_runtime_status("draining")
+            if session_key:
+                self._running_agents[session_key] = agent_holder[0]
+                if self._draining:
+                    self._update_runtime_status("draining")
         
         tracking_task = asyncio.create_task(track_agent())
         
@@ -10789,14 +10775,7 @@ class GatewayRunner:
             # Clean up tracking
             tracking_task.cancel()
             if session_key:
-                # Only release the slot if this run's generation still owns
-                # it.  A /stop or /new that bumped the generation while we
-                # were unwinding has already installed its own state; this
-                # guard prevents an old run from clobbering it on the way
-                # out.
-                self._release_running_agent_state(
-                    session_key, run_generation=run_generation
-                )
+                self._release_running_agent_state(session_key)
             if self._draining:
                 self._update_runtime_status("draining")
             

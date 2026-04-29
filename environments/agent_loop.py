@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Set
 from model_tools import handle_function_call
 from tools.terminal_tool import get_active_env
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
+from agent.tool_result_sanitizer import sanitize_tool_result
 
 # Thread pool for running sync tool calls that internally use asyncio.run()
 # (e.g., the Modal/Docker/Daytona terminal backends). Running them in a separate
@@ -462,6 +463,9 @@ class HermesAgentLoop:
                         env=get_active_env(self.task_id),
                         config=self.budget_config,
                     )
+
+                    # [MindMate] Sanitize: strip internal metadata before LLM sees it
+                    tool_result = sanitize_tool_result(tool_result, tool_name)
 
                     messages.append(
                         {

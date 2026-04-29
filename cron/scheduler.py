@@ -309,12 +309,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     }
 
     # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
+    # is a cron delivery.  Wrapping is OFF by default for clean user experience.
+    # Set cron.wrap_response: true in config.yaml to enable verbose delivery.
+    wrap_response = False
     try:
         user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        wrap_response = user_cfg.get("cron", {}).get("wrap_response", False)
     except Exception:
         pass
 

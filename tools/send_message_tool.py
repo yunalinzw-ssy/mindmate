@@ -125,6 +125,32 @@ SEND_MESSAGE_SCHEMA = {
             "message": {
                 "type": "string",
                 "description": "The message text to send"
+            },
+            "keyboard": {
+                "type": "object",
+                "description": (
+                    "Telegram inline keyboard configuration. Format: "
+                    "{\"inline_keyboard\": [[{\"text\": \"Button Text\", \"callback_data\": \"callback_value\"}, ...], ...]}. "
+                    "Each row is an array of buttons. callback_data should be a short string (max 64 bytes). "
+                    "Example: {\"inline_keyboard\": [[{\"text\": \"Yes\", \"callback_data\": \"yes\"}, {\"text\": \"No\", \"callback_data\": \"no\"}]]}"
+                ),
+                "properties": {
+                    "inline_keyboard": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"},
+                                    "callback_data": {"type": "string"},
+                                    "url": {"type": "string"}
+                                },
+                                "required": ["text"]
+                            }
+                        }
+                    }
+                }
             }
         },
         "required": []
@@ -155,6 +181,7 @@ def _handle_send(args):
     """Send a message to a platform target."""
     target = args.get("target", "")
     message = args.get("message", "")
+    keyboard = args.get("keyboard")  # Optional inline keyboard for Telegram
     if not target or not message:
         return tool_error("Both 'target' and 'message' are required when action='send'")
 
@@ -281,6 +308,7 @@ def _handle_send(args):
                 cleaned_message,
                 thread_id=thread_id,
                 media_files=media_files,
+                keyboard=keyboard,
             )
         )
         if used_home_channel and isinstance(result, dict) and result.get("success"):
@@ -401,12 +429,21 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None):
+async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, keyboard=None):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
     using the same smart-splitting algorithm as the gateway adapters
     (preserves code-block boundaries, adds part indicators).
+    
+    Args:
+        platform: Platform enum value
+        pconfig: PlatformConfig for the target platform
+        chat_id: Target chat ID
+        message: Message text to send
+        thread_id: Optional thread/topic ID
+        media_files: Optional list of media file paths
+        keyboard: Optional Telegram inline keyboard dict
     """
     from gateway.config import Platform
     from gateway.platforms.base import BasePlatformAdapter, utf16_len
@@ -468,6 +505,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 media_files=media_files if is_last else [],
                 thread_id=thread_id,
                 disable_link_previews=disable_link_previews,
+                keyboard=keyboard if is_last else None,  # Only apply keyboard to last chunk
             )
             if isinstance(result, dict) and result.get("error"):
                 return result
@@ -585,16 +623,25 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     return last_result
 
 
-async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False):
+async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, keyboard=None):
     """Send via Telegram Bot API (one-shot, no polling needed).
 
     Applies markdown→MarkdownV2 formatting (same as the gateway adapter)
     so that bold, links, and headers render correctly.  If the message
     already contains HTML tags, it is sent with ``parse_mode='HTML'``
     instead, bypassing MarkdownV2 conversion.
+    
+    Args:
+        token: Telegram bot token
+        chat_id: Target chat ID
+        message: Message text to send
+        media_files: Optional list of (path, is_voice) tuples
+        thread_id: Optional thread/topic ID
+        disable_link_previews: Whether to disable link previews
+        keyboard: Optional dict with inline_keyboard structure
     """
     try:
-        from telegram import Bot
+        from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
         from telegram.constants import ParseMode
 
         # Auto-detect HTML tags — if present, skip MarkdownV2 and send as HTML.
@@ -624,6 +671,34 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         if disable_link_previews:
             thread_kwargs["disable_web_page_preview"] = True
 
+        # Build inline keyboard from keyboard dict
+        reply_markup = None
+        if keyboard and isinstance(keyboard, dict) and "inline_keyboard" in keyboard:
+            try:
+                keyboard_rows = []
+                for row in keyboard["inline_keyboard"]:
+                    row_buttons = []
+                    for btn in row:
+                        if "callback_data" in btn:
+                            row_buttons.append(InlineKeyboardButton(
+                                text=btn["text"],
+                                callback_data=btn["callback_data"]
+                            ))
+                        elif "url" in btn:
+                            row_buttons.append(InlineKeyboardButton(
+                                text=btn["text"],
+                                url=btn["url"]
+                            ))
+                        else:
+                            row_buttons.append(InlineKeyboardButton(
+                                text=btn["text"],
+                                callback_data=btn.get("callback_data", btn["text"])
+                            ))
+                    keyboard_rows.append(row_buttons)
+                reply_markup = InlineKeyboardMarkup(keyboard_rows)
+            except Exception as kb_error:
+                logger.warning("Failed to build inline keyboard: %s", kb_error)
+
         last_msg = None
         warnings = []
 
@@ -632,7 +707,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 last_msg = await _send_telegram_message_with_retry(
                     bot,
                     chat_id=int_chat_id, text=formatted,
-                    parse_mode=send_parse_mode, **thread_kwargs
+                    parse_mode=send_parse_mode, reply_markup=reply_markup, **thread_kwargs
                 )
             except Exception as md_error:
                 # Parse failed, fall back to plain text
@@ -653,7 +728,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                     last_msg = await _send_telegram_message_with_retry(
                         bot,
                         chat_id=int_chat_id, text=plain,
-                        parse_mode=None, **thread_kwargs
+                        parse_mode=None, reply_markup=reply_markup, **thread_kwargs
                     )
                 else:
                     raise
