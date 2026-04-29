@@ -8,7 +8,8 @@
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.
-  default: "anthropic/claude-opus-4.6"
+  # [MindMate] 默认使用 GLM-5.1 via z.ai
+  default: "glm-5.1"
   
   # Inference provider selection:
   #   "auto"         - Auto-detect from credentials (default)

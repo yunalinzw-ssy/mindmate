@@ -67,7 +67,7 @@ uv pip install -e ".[all]"
 # 5. 配置 LLM Provider（智谱 GLM）
 hermes config set model.provider custom
 hermes config set model.base_url https://api.z.ai/api/paas/v4
-hermes config set model.default glm-4-plus
+hermes config set model.default glm-5.1
 
 # 6. 写入 .env 文件
 echo 'GLM_API_KEY=d3ea16b8d7ad49afafca496ea0ecbc20.5cBzyTCUQfLak33U' > .env
@@ -79,7 +79,7 @@ echo 'GLM_BASE_URL=https://api.z.ai/api/paas/v4' >> .env
 | 项目 | 值 |
 |---|---|
 | **Provider** | Custom（OpenAI 兼容接口） |
-| **模型** | glm-4-plus（智谱 GLM-4-Plus） |
+| **模型** | glm-5.1（智谱 GLM-5.1） |
 | **Base URL** | `https://api.z.ai/api/paas/v4` |
 | **API Key 来源** | [智谱 AI 开放平台](https://open.bigmodel.cn) |
 
